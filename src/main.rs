@@ -1,9 +1,12 @@
 pub mod config;
 pub mod dns_utils;
 use anyhow::{anyhow, Context, Result};
+use bytes::Bytes;
 use clap::{App, Arg};
 use config::Config;
 use dns_utils::{create_dns_query, parse_dns_answer};
+use env_logger;
+use log::trace;
 use odoh_rs::*;
 use rand::rngs::StdRng;
 use rand::SeedableRng;
@@ -43,17 +46,39 @@ impl ClientSession {
             None
         };
 
-        // fetch `odohconfigs` by querying well known endpoint using GET request
-        let mut odohconfigs = reqwest::get(&format!("{}{}", config.server.target, WELL_KNOWN))
-            .await?
-            .bytes()
-            .await?;
-        let configs: ObliviousDoHConfigs = parse(&mut odohconfigs).context("invalid configs")?;
-        let target_config = configs
-            .into_iter()
-            .next()
-            .context("no available config")?
-            .into();
+        trace!("Config: {:?}", config.server);
+        let target_config = {
+            let configs: ObliviousDoHConfigs = match config.server.target_odoh_config {
+                // Check if target odoh config is provided in the config file
+                Some(target_odoh_config) => {
+                    trace!(
+                        "target odoh config from config file: {}",
+                        target_odoh_config
+                    );
+                    let mut odohconfigs = Bytes::from(
+                        hex::decode(target_odoh_config)
+                            .context("invalid target odoh config in config.toml")?,
+                    );
+                    parse(&mut odohconfigs).context("invalid target odoh config in config.toml")?
+                }
+                None => {
+                    // fetch `odohconfigs` by querying well known endpoint using GET request
+                    let mut odohconfigs =
+                        reqwest::get(&format!("{}{}", config.server.target, WELL_KNOWN))
+                            .await?
+                            .bytes()
+                            .await?;
+                    parse(&mut odohconfigs).context("invalid configs")?
+                }
+            };
+            configs
+                .into_iter()
+                .next()
+                .context("no available config")?
+                .into()
+        };
+
+        trace!("using target odh config {:?}", target_config);
 
         Ok(Self {
             client: Client::new(),
@@ -156,6 +181,8 @@ async fn main() -> Result<()> {
                 .index(2),
         )
         .get_matches();
+
+    env_logger::init();
 
     let config_file = matches
         .value_of("config_file")
